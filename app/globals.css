@@ -1,0 +1,58 @@
+/* MandiSync Global Styles — حکومتی ایپ انداز */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --primary: #006633;
+  --primary-light: #008844;
+  --primary-dark: #004d26;
+  --accent: #d4af37;
+  --accent-light: #e8c94a;
+  --white: #ffffff;
+  --bg: #f4f7f5;
+  --text: #1a1a1a;
+  --text-light: #555555;
+  --error: #cc0000;
+  --error-bg: #fff0f0;
+  --success: #006633;
+  --success-bg: #f0fff5;
+  --border: #dde3df;
+  --shadow: 0 2px 12px rgba(0, 102, 51, 0.08);
+}
+
+html,
+body {
+  height: 100%;
+  font-family: "Noto Nastaliq Urdu", "Noto Sans Arabic", "Segoe UI", sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
