@@ -87,22 +87,57 @@ const FALLBACK: ChatbotAnswer = {
   sources: [],
 };
 
+// ---------------------------------------------------------------------------
+// Urdu stop-words — appear in nearly every question, must be filtered out
+// so meaningful tokens (آواز, ریکارڈ, نرخ, سیٹلمنٹ, etc.) drive the match.
+// ---------------------------------------------------------------------------
+
+const URDU_STOPWORDS = new Set([
+  "کیسے", "کریں", "کرنے", "کرتا", "کرتی", "کرتے",
+  "ہے", "ہیں", "ہو", "ہوا", "ہوئی", "ہوئے",
+  "کیا", "کیوں", "کہاں", "کب", "کس", "کون",
+  "کا", "کی", "کے", "کو", "سے", "میں", "پر", "تک",
+  "اور", "یا", "تو", "اگر", "مگر", "لیکن",
+  "ایک", "دو", "تین", "یہ", "وہ", "اس", "ان",
+  "بھی", "ہی", "نہ", "نہیں", "مت",
+  "کر", "دے", "لے", "جا", "آ",
+]);
+
+/**
+ * Remove Urdu stop-words from a token list.
+ * If filtering leaves nothing, fall back to the original tokens.
+ */
+function filterStopwords(tokens: string[]): string[] {
+  const meaningful = tokens.filter(t => !URDU_STOPWORDS.has(t));
+  return meaningful.length > 0 ? meaningful : tokens;
+}
+
 /**
  * Rank knowledge entries by token relevance and return the best match.
+ * Uses higher weight for unique/meaningful tokens in titles.
  */
 function rankAndReturn(
   data: Array<{ id: number; title: string; content: string; category: string | null }>,
-  tokens: string[],
+  meaningfulTokens: string[],
 ): ChatbotAnswer {
   const scored = data.map((entry) => {
     let score = 0;
     const lowerTitle = entry.title.toLowerCase();
     const lowerContent = entry.content.toLowerCase();
-    for (const token of tokens) {
+
+    for (const token of meaningfulTokens) {
       const lt = token.toLowerCase();
-      if (lowerTitle.includes(lt)) score += 3;
+      // Title match for a meaningful token is very strong signal
+      if (lowerTitle.includes(lt)) score += 5;
       if (lowerContent.includes(lt)) score += 1;
     }
+
+    // Bonus: entry whose title contains the MOST meaningful tokens wins
+    const titleTokenHits = meaningfulTokens.filter(
+      t => lowerTitle.includes(t.toLowerCase())
+    ).length;
+    if (titleTokenHits >= 2) score += 3; // multi-token title match bonus
+
     return { ...entry, score };
   });
 
@@ -113,10 +148,10 @@ function rankAndReturn(
 
   const best = scored[0];
 
-  // Truncate long answers to ~400 chars for readability
+  // Truncate long answers to ~600 chars for readability (Urdu is compact)
   let answer = best.content;
-  if (answer.length > 400) {
-    answer = answer.slice(0, 397) + "...";
+  if (answer.length > 600) {
+    answer = answer.slice(0, 597) + "...";
   }
 
   return {
@@ -132,19 +167,22 @@ function rankAndReturn(
 
 /**
  * Search the chatbot_knowledge table for entries matching the query.
- * Uses ILIKE on title and content columns for fuzzy Urdu text matching.
+ * Filters Urdu stop-words first, then uses ILIKE on meaningful tokens only.
  * Falls back to broad search if no ILIKE matches found.
  */
 async function searchKnowledge(query: string): Promise<ChatbotAnswer> {
   const supabase = await createClient();
 
   // Extract key words from the query (split on spaces, filter short tokens)
-  const tokens = query
+  const rawTokens = query
     .split(/\s+/)
-    .map(t => t.trim())
+    .map(t => t.trim().replace(/[؟?!.,]/g, ""))
     .filter(t => t.length >= 2);
 
-  if (tokens.length === 0) return FALLBACK;
+  if (rawTokens.length === 0) return FALLBACK;
+
+  // Filter out Urdu stop-words so meaningful tokens drive the search
+  const tokens = filterStopwords(rawTokens);
 
   // Build OR conditions for ILIKE matching on title AND content
   const conditions = tokens
@@ -155,7 +193,7 @@ async function searchKnowledge(query: string): Promise<ChatbotAnswer> {
     .from("chatbot_knowledge")
     .select("id, title, content, category")
     .or(conditions)
-    .limit(10);
+    .limit(15);
 
   // If ILIKE returns nothing, try a broader search (fetch all, rank client-side)
   if (error || !data || data.length === 0) {
