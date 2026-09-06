@@ -289,6 +289,7 @@ const URDU_MULTIPLIER_MAP: Record<string, number> = {
 
 /**
  * Attempts to convert Urdu number words in a text segment to a numeric value.
+ * Only processes contiguous number words — stops at the first non-number word.
  * E.g., "آٹھ سو" → 800, "بارہ سو" → 1200, "ایک ہزار" → 1000, "پانچ سو پچاس" → 550
  */
 function urduWordsToNumber(text: string): number | null {
@@ -306,19 +307,70 @@ function urduWordsToNumber(text: string): number | null {
     } else if (URDU_DIGIT_MAP[word] !== undefined) {
       current = current + URDU_DIGIT_MAP[word];
       matched = true;
-    }
-    // Also try Eastern Arabic numerals: ۰۱۲۳۴۵۶۷۸۹
-    const easternDigits = word.replace(/[۰-۹]/g, d =>
-      String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))
-    );
-    if (/^\d+$/.test(easternDigits) && easternDigits !== word) {
-      current = parseInt(easternDigits, 10);
-      matched = true;
+    } else {
+      // Also try Eastern Arabic numerals: ۰۱۲۳۴۵۶۷۸۹
+      const easternDigits = word.replace(/[۰-۹]/g, d =>
+        String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+      );
+      if (/^\d+$/.test(easternDigits) && easternDigits !== word) {
+        current = parseInt(easternDigits, 10);
+        matched = true;
+      } else {
+        // Non-number word — stop accumulating
+        break;
+      }
     }
   }
 
   total += current;
   return matched && total > 0 ? total : null;
+}
+
+/**
+ * Extract number words from the END of a text segment (scanning right-to-left).
+ * E.g., "...کی قیمت آٹھ سو" → extracts "آٹھ سو" → 800
+ */
+function extractNumberFromEnd(text: string): number | null {
+  const words = text.replace(/[،,.!?؟]/g, "").split(/\s+/).filter(Boolean);
+  // Walk backwards collecting number words
+  const numWords: string[] = [];
+  for (let i = words.length - 1; i >= 0; i--) {
+    const w = words[i];
+    if (URDU_DIGIT_MAP[w] !== undefined || URDU_MULTIPLIER_MAP[w] !== undefined) {
+      numWords.unshift(w);
+    } else {
+      // Check Eastern Arabic numerals
+      const easternDigits = w.replace(/[۰-۹]/g, d => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)));
+      if (/^\d+$/.test(easternDigits) && easternDigits !== w) {
+        numWords.unshift(w);
+      } else {
+        break; // non-number word, stop
+      }
+    }
+  }
+  return numWords.length > 0 ? urduWordsToNumber(numWords.join(" ")) : null;
+}
+
+/**
+ * Extract number words from the START of a text segment.
+ * E.g., "بارہ سو روپے فی گٹو..." → extracts "بارہ سو" → 1200
+ */
+function extractNumberFromStart(text: string): number | null {
+  const words = text.replace(/[،,.!?؟]/g, "").split(/\s+/).filter(Boolean);
+  const numWords: string[] = [];
+  for (const w of words) {
+    if (URDU_DIGIT_MAP[w] !== undefined || URDU_MULTIPLIER_MAP[w] !== undefined) {
+      numWords.push(w);
+    } else {
+      const easternDigits = w.replace(/[۰-۹]/g, d => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)));
+      if (/^\d+$/.test(easternDigits) && easternDigits !== w) {
+        numWords.push(w);
+      } else {
+        break;
+      }
+    }
+  }
+  return numWords.length > 0 ? urduWordsToNumber(numWords.join(" ")) : null;
 }
 
 /**
@@ -334,27 +386,40 @@ function extractPricesFromText(text: string): {
   const result = { minPrice: null as number | null, maxPrice: null as number | null, avgPrice: null as number | null, currentPrice: null as number | null };
 
   // Pattern: "X سے Y" (range: X to Y)
-  const rangeMatch = text.match(/([\u0600-\u06FF\s۰-۹]+)\s+سے\s+([\u0600-\u06FF\s۰-۹]+)/);
-  if (rangeMatch) {
-    const low = urduWordsToNumber(rangeMatch[1]);
-    const high = urduWordsToNumber(rangeMatch[2]);
+  // Split on "سے" and extract number from end of left part and start of right part
+  const rangeIdx = text.indexOf(" سے ");
+  if (rangeIdx > 0) {
+    const leftPart = text.slice(0, rangeIdx);
+    const rightPart = text.slice(rangeIdx + 4); // skip " سے "
+    const low = extractNumberFromEnd(leftPart);
+    const high = extractNumberFromStart(rightPart);
+    console.log("[Fallback] Range: leftPart ends with =>", low, ", rightPart starts with =>", high);
     if (low && high) {
       result.minPrice = Math.min(low, high);
       result.maxPrice = Math.max(low, high);
     }
   }
 
-  // Pattern: "اوسط ... NUMBER" (average)
-  const avgSegment = text.match(/اوسط[^۔]*?([\u0600-\u06FF\s۰-۹]+?)(?:\s+روپے|\s+ہے|$)/);
-  if (avgSegment) {
-    result.avgPrice = urduWordsToNumber(avgSegment[1]);
+  // Pattern: "اوسط ... NUMBER روپے" (average)
+  const avgIdx = text.indexOf("اوسط");
+  if (avgIdx >= 0) {
+    const afterAvg = text.slice(avgIdx);
+    // Find the sentence end or "روپے"
+    const sentenceEnd = afterAvg.indexOf("۔");
+    const avgText = sentenceEnd > 0 ? afterAvg.slice(0, sentenceEnd) : afterAvg;
+    // Skip "اوسط" and "قیمت" words, then extract number
+    const cleaned = avgText.replace(/^اوسط\s*/, "").replace(/^قیمت\s*/, "");
+    result.avgPrice = extractNumberFromStart(cleaned);
+    console.log("[Fallback] Avg segment:", JSON.stringify(cleaned), "=>", result.avgPrice);
   }
 
   // Pattern: single price "قیمت NUMBER روپے"
   if (!result.minPrice && !result.maxPrice) {
-    const singleMatch = text.match(/قیمت\s+([\u0600-\u06FF\s۰-۹]+?)\s*(?:روپے|فی|$)/);
-    if (singleMatch) {
-      result.currentPrice = urduWordsToNumber(singleMatch[1]);
+    const priceIdx = text.indexOf("قیمت");
+    if (priceIdx >= 0) {
+      const afterPrice = text.slice(priceIdx + 5); // skip "قیمت "
+      result.currentPrice = extractNumberFromStart(afterPrice);
+      console.log("[Fallback] Single price:", result.currentPrice);
     }
   }
 
