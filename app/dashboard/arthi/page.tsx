@@ -222,6 +222,7 @@ export default function ArthiDashboard() {
   const [auctionDate, setAuctionDate] = useState("");
   const [auctionTime, setAuctionTime] = useState("");
   const [auctionMsg, setAuctionMsg] = useState("");
+  const [publishedArrivalIds, setPublishedArrivalIds] = useState<Set<number>>(new Set());
 
   // Receipt state
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
@@ -306,7 +307,7 @@ export default function ArthiDashboard() {
 
       // Load arrivals, all farmers, voice note history, current month expenses, crops, and settlements
       const currentMonth = new Date().toISOString().slice(0, 7);
-      const [arrRes, farmerRes, vnRes, expRes, cropsRes, settlRes] = await Promise.all([
+      const [arrRes, farmerRes, vnRes, expRes, cropsRes, settlRes, auctionRes] = await Promise.all([
         supabase.from("crop_arrivals")
           .select("*, crops(name, urdu_name), users:farmer_landlord_id(name)")
           .eq("arthi_id", profile.id)
@@ -331,7 +332,18 @@ export default function ArthiDashboard() {
           .select("*, users:farmer_landlord_id(name), crops(name, urdu_name), settlement_bidders(bidder_name, gattu_count, cost)")
           .eq("arthi_id", profile.id)
           .order("settlement_date", { ascending: false }).limit(30),
+        supabase.from("auction_notices")
+          .select("arrival_id")
+          .eq("arthi_id", profile.id)
+          .not("arrival_id", "is", null),
       ]);
+
+      // Track which arrivals already have published auction notices
+      const publishedIds = new Set<number>();
+      for (const row of (auctionRes.data ?? [])) {
+        if (row.arrival_id != null) publishedIds.add(row.arrival_id);
+      }
+      setPublishedArrivalIds(publishedIds);
 
       // Set all farmers directly from the users query
       const allFarmers = (farmerRes.data ?? []) as { id: number; name: string | null; phone: string | null }[];
@@ -641,15 +653,38 @@ export default function ArthiDashboard() {
     e.preventDefault();
     if (!auctionArrival || !arthiId || !auctionDate || !auctionTime) return;
     const supabase = createClient();
-    await supabase.from("auction_notices").insert({
+
+    // Resolve mandi_id from this arthi's mandi_prices (fallback to null)
+    let resolvedMandiId: number | null = null;
+    const { data: mandiPrice } = await supabase
+      .from("mandi_prices")
+      .select("mandi_id")
+      .eq("arthi_id", arthiId)
+      .not("mandi_id", "is", null)
+      .limit(1)
+      .maybeSingle();
+    if (mandiPrice?.mandi_id) resolvedMandiId = mandiPrice.mandi_id;
+
+    const { error } = await supabase.from("auction_notices").insert({
       arrival_id: auctionArrival.id,
       arthi_id: arthiId,
       crop_id: auctionArrival.crop_id,
-      mandi_id: null,
+      mandi_id: resolvedMandiId,
       auction_date: auctionDate,
       auction_time: auctionTime,
       message: auctionMsg || null,
     });
+
+    if (error) {
+      setToast({ msg: `نوٹس شائع نہیں ہوا: ${error.message}`, ok: false });
+      setTimeout(() => setToast(null), 5000);
+      return;
+    }
+
+    // Mark this arrival as published
+    setPublishedArrivalIds(prev => new Set(prev).add(auctionArrival.id));
+    setToast({ msg: "✓ نیلامی کا نوٹس شائع ہو گیا", ok: true });
+    setTimeout(() => setToast(null), 5000);
     setAuctionArrival(null);
     setAuctionDate(""); setAuctionTime(""); setAuctionMsg("");
   }
@@ -1350,6 +1385,15 @@ export default function ArthiDashboard() {
                       }}>
                         {a.status === "confirmed" ? "تصدیق شدہ" : "زیر التوا"}
                       </span>
+                      {publishedArrivalIds.has(a.id) && (
+                        <span style={{
+                          ...s.badge,
+                          background: "#e8f5e9",
+                          color: "#2e7d32",
+                        }}>
+                          ✓ نوٹس شائع شدہ
+                        </span>
+                      )}
                     </div>
 
                     <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.75rem", flexWrap: "wrap" }}>
@@ -1358,7 +1402,7 @@ export default function ArthiDashboard() {
                           <CheckCircle size={14} /> آمد کی تصدیق کریں
                         </button>
                       )}
-                      {a.status === "confirmed" && (
+                      {a.status === "confirmed" && !publishedArrivalIds.has(a.id) && (
                         <button style={s.btnOutline} onClick={() => setAuctionArrival(a)}>
                           <TrendingUp size={14} /> نیلامی کا نوٹس بنائیں
                         </button>

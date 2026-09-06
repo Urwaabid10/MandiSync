@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import type { Tables } from "@/types/supabase";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer,
+  ResponsiveContainer, Legend,
 } from "recharts";
 import {
   TrendingUp, MessageSquare, FileText,
@@ -193,7 +193,7 @@ export default function FarmerDashboard() {
 
   // Data
   const [mandiPrices, setMandiPrices] = useState<MandiPriceEntry[]>([]);
-  const [chartData, setChartData] = useState<ChartPoint[]>([]);
+  const [chartData, setChartData] = useState<Record<string, ChartPoint[]>>({});
   const [shops, setShops] = useState<ShopProfile[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -224,6 +224,10 @@ export default function FarmerDashboard() {
       setFarmerId(profile.id);
 
       // Parallel loads
+      const pastDate = new Date(); pastDate.setDate(pastDate.getDate() - 2);
+      const pastDateStr = pastDate.toISOString().split("T")[0];
+      const futureDate = new Date(); futureDate.setDate(futureDate.getDate() + 7);
+      const futureDateStr = futureDate.toISOString().split("T")[0];
       const [pricesRes, auctionsRes, settlementsRes] = await Promise.all([
         supabase.from("mandi_prices")
           .select("id, price, created_at, mandi_id, arthi_id, crops(name, urdu_name)")
@@ -231,7 +235,8 @@ export default function FarmerDashboard() {
           .limit(200),
         supabase.from("auction_notices")
           .select("id, auction_date, auction_time, message, crops(name, urdu_name), mandis(name, city)")
-          .gte("auction_date", new Date().toISOString().split("T")[0])
+          .gte("auction_date", pastDateStr)
+          .lte("auction_date", futureDateStr)
           .order("auction_date", { ascending: true }),
         supabase.from("settlements")
           .select("*, arthi:users!arthi_id(name, shop_name, shop_address, shop_city), crops(name, urdu_name), settlement_bidders(bidder_name, gattu_count, cost)")
@@ -318,30 +323,37 @@ export default function FarmerDashboard() {
       });
       setMandiPrices(entries);
 
-      // ── Chart data ──
+      // ── Chart data (grouped by crop name) ──
       if (entries.length > 0) {
         const chronological = [...entries].sort((a, b) =>
           (a.created_at ?? "").localeCompare(b.created_at ?? "")
         );
-        const byDate = new Map<string, number[]>();
+        // Collect all prices per (crop, date)
+        const byCropDate = new Map<string, Map<string, number[]>>();
         for (const e of chronological) {
           if (!e.created_at) continue;
           const dateLabel = new Date(e.created_at).toLocaleDateString("en-PK", {
             month: "short", day: "numeric",
           });
-          if (!byDate.has(dateLabel)) byDate.set(dateLabel, []);
-          byDate.get(dateLabel)!.push(e.price);
+          if (!byCropDate.has(e.cropName)) byCropDate.set(e.cropName, new Map());
+          const dateMap = byCropDate.get(e.cropName)!;
+          if (!dateMap.has(dateLabel)) dateMap.set(dateLabel, []);
+          dateMap.get(dateLabel)!.push(e.price);
         }
-        const points: ChartPoint[] = [];
-        for (const [date, ps] of byDate) {
-          points.push({
-            date,
-            avg: Math.round(ps.reduce((a, b) => a + b, 0) / ps.length),
-            min: Math.min(...ps),
-            max: Math.max(...ps),
-          });
+        const chartMap: Record<string, ChartPoint[]> = {};
+        for (const [crop, dateMap] of byCropDate) {
+          const points: ChartPoint[] = [];
+          for (const [date, prices] of dateMap) {
+            points.push({
+              date,
+              avg: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length),
+              min: Math.min(...prices),
+              max: Math.max(...prices),
+            });
+          }
+          chartMap[crop] = points;
         }
-        setChartData(points);
+        setChartData(chartMap);
       }
 
       // ── Arthi profiles with per-arthi voice updates ──
@@ -384,7 +396,12 @@ export default function FarmerDashboard() {
       }
 
       // ── Auction notices ──
-      setAuctions((auctionsRes.data ?? []).map(a => {
+      const seenAuctionIds = new Set<number>();
+      setAuctions((auctionsRes.data ?? []).filter(a => {
+        if (seenAuctionIds.has(a.id)) return false;
+        seenAuctionIds.add(a.id);
+        return true;
+      }).map(a => {
         const crop = a.crops as unknown as { name?: string; urdu_name?: string } | null;
         const mandi = a.mandis as unknown as { name?: string; city?: string } | null;
         return {
@@ -488,6 +505,16 @@ export default function FarmerDashboard() {
     }
     mandiGroups.get(key)!.prices.push(entry);
   }
+
+  // Group auctions into today / tomorrow / upcoming
+  const todayStr = new Date().toISOString().split("T")[0];
+  const tmrDate = new Date(); tmrDate.setDate(tmrDate.getDate() + 1);
+  const tomorrowStr = tmrDate.toISOString().split("T")[0];
+  const todayAuctions = auctions.filter(a => a.auctionDate === todayStr);
+  const tomorrowAuctions = auctions.filter(a => a.auctionDate === tomorrowStr);
+  const upcomingAuctions = auctions
+    .filter(a => a.auctionDate > tomorrowStr)
+    .sort((a, b) => a.auctionDate.localeCompare(b.auctionDate));
 
   // -----------------------------------------------------------------------
   // Render
@@ -633,60 +660,138 @@ export default function FarmerDashboard() {
           </div>
         )}
 
-        {/* ── Section 3: Price Trend Chart ── */}
-        {chartData.length > 0 && (
+        {/* ── Section 3: Price Trend Charts (per crop) ── */}
+        {Object.keys(chartData).length > 0 && (
           <div style={s.section}>
             <div style={s.sectionTitle}><TrendingUp size={18} /> روزانہ نرخ رجحان</div>
-            <div style={s.chartWrap}>
-              <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
-                  <XAxis dataKey="date" fontSize={11} tick={{ fill: "#555" }} />
-                  <YAxis fontSize={11} tick={{ fill: "#555" }} />
-                  <Tooltip
-                    formatter={(value, name) => {
-                      const labels: Record<string, string> = { avg: "اوسط", min: "کم", max: "زیادہ" };
-                      return [`Rs. ${value}`, labels[String(name)] ?? String(name)];
-                    }}
-                    contentStyle={{ borderRadius: 8, border: "1px solid #D4AF37" }}
-                  />
-                  <Line
-                    type="monotone" dataKey="avg" stroke="#006633"
-                    strokeWidth={2} dot={{ fill: "#D4AF37", r: 4 }}
-                    activeDot={{ r: 6, fill: "#006633" }}
-                  />
-                  <Line type="monotone" dataKey="min" stroke="#b8860b" strokeWidth={1} strokeDasharray="4 4" dot={false} />
-                  <Line type="monotone" dataKey="max" stroke="#cc0000" strokeWidth={1} strokeDasharray="4 4" dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
+            <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
+              {Object.entries(chartData).map(([cropName, points], idx) => {
+                const colors = ["#006633", "#D4AF37", "#b8860b", "#cc0000", "#2563eb", "#7c3aed"];
+                const lineColor = colors[idx % colors.length];
+                return (
+                  <div key={cropName}>
+                    <div style={{ fontWeight: 700, color: "#006633", fontSize: "0.95rem", marginBottom: "0.5rem" }}>
+                      {cropName}
+                    </div>
+                    <div style={s.chartWrap}>
+                      <ResponsiveContainer width="100%" height={260}>
+                        <LineChart data={points}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#eee" />
+                          <XAxis dataKey="date" fontSize={11} tick={{ fill: "#555" }} />
+                          <YAxis fontSize={11} tick={{ fill: "#555" }} />
+                          <Tooltip
+                            formatter={(value, name) => {
+                              const labels: Record<string, string> = { avg: "اوسط", min: "کم", max: "زیادہ" };
+                              return [`Rs. ${value}`, labels[String(name)] ?? String(name)];
+                            }}
+                            contentStyle={{ borderRadius: 8, border: "1px solid #D4AF37" }}
+                          />
+                          <Legend
+                            formatter={(value) => {
+                              const labels: Record<string, string> = { avg: "اوسط", min: "کم", max: "زیادہ" };
+                              return labels[String(value)] ?? String(value);
+                            }}
+                          />
+                          <Line
+                            type="monotone" dataKey="avg" stroke={lineColor}
+                            strokeWidth={2} dot={{ fill: "#D4AF37", r: 4 }}
+                            activeDot={{ r: 6, fill: lineColor }}
+                          />
+                          <Line type="monotone" dataKey="min" stroke="#b8860b" strokeWidth={1} strokeDasharray="4 4" dot={false} />
+                          <Line type="monotone" dataKey="max" stroke="#cc0000" strokeWidth={1} strokeDasharray="4 4" dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
 
-        {/* ── Section 4: Auction Notices ── */}
+        {/* ── Section 4: Auction Notices (Today & Tomorrow) ── */}
         <div style={s.section}>
           <div style={s.sectionTitle}><Calendar size={18} /> نیلامی کی اطلاعات</div>
-          {auctions.length === 0 ? (
+          {todayAuctions.length === 0 && tomorrowAuctions.length === 0 && upcomingAuctions.length === 0 ? (
             <div style={s.emptyState}>کوئی آنے والی نیلامی نہیں</div>
           ) : (
-            <div style={s.grid}>
-              {auctions.map(a => (
-                <div key={a.id} style={s.auctionCard}>
-                  <div style={{ fontWeight: 700, color: "#006633", fontSize: "1rem" }}>{a.cropName}</div>
-                  <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 4 }}>
-                    <Building size={12} style={{ display: "inline" }} /> {a.mandiName}, {a.mandiCity}
+            <>
+              {todayAuctions.length > 0 && (
+                <div style={{ marginBottom: "1.25rem" }}>
+                  <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#D4AF37", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Calendar size={15} /> آج
                   </div>
-                  <div style={{ fontSize: "0.85rem", marginTop: 6 }}>
-                    <Calendar size={13} style={{ display: "inline" }} /> {fmtDate(a.auctionDate)} — {a.auctionTime}
+                  <div style={s.grid}>
+                    {todayAuctions.map(a => (
+                      <div key={a.id} style={s.auctionCard}>
+                        <div style={{ fontWeight: 700, color: "#006633", fontSize: "1rem" }}>{a.cropName}</div>
+                        <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 4 }}>
+                          <Building size={12} style={{ display: "inline" }} /> {a.mandiName}{a.mandiCity ? `, ${a.mandiCity}` : ""}
+                        </div>
+                        <div style={{ fontSize: "0.85rem", marginTop: 6 }}>
+                          <Calendar size={13} style={{ display: "inline" }} /> {fmtDate(a.auctionDate)} — {a.auctionTime}
+                        </div>
+                        {a.message && (
+                          <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6, borderTop: "1px solid #eee", paddingTop: 6 }}>
+                            {a.message}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                  {a.message && (
-                    <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6, borderTop: "1px solid #eee", paddingTop: 6 }}>
-                      {a.message}
-                    </div>
-                  )}
                 </div>
-              ))}
-            </div>
+              )}
+              {tomorrowAuctions.length > 0 && (
+                <div style={{ marginBottom: "1.25rem" }}>
+                  <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#006633", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Calendar size={15} /> کل
+                  </div>
+                  <div style={s.grid}>
+                    {tomorrowAuctions.map(a => (
+                      <div key={a.id} style={s.auctionCard}>
+                        <div style={{ fontWeight: 700, color: "#006633", fontSize: "1rem" }}>{a.cropName}</div>
+                        <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 4 }}>
+                          <Building size={12} style={{ display: "inline" }} /> {a.mandiName}{a.mandiCity ? `, ${a.mandiCity}` : ""}
+                        </div>
+                        <div style={{ fontSize: "0.85rem", marginTop: 6 }}>
+                          <Calendar size={13} style={{ display: "inline" }} /> {fmtDate(a.auctionDate)} — {a.auctionTime}
+                        </div>
+                        {a.message && (
+                          <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6, borderTop: "1px solid #eee", paddingTop: 6 }}>
+                            {a.message}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {upcomingAuctions.length > 0 && (
+                <div>
+                  <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#555", marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Calendar size={15} /> آنے والی نیلامیاں
+                  </div>
+                  <div style={s.grid}>
+                    {upcomingAuctions.map(a => (
+                      <div key={a.id} style={s.auctionCard}>
+                        <div style={{ fontWeight: 700, color: "#006633", fontSize: "1rem" }}>{a.cropName}</div>
+                        <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 4 }}>
+                          <Building size={12} style={{ display: "inline" }} /> {a.mandiName}{a.mandiCity ? `, ${a.mandiCity}` : ""}
+                        </div>
+                        <div style={{ fontSize: "0.85rem", marginTop: 6 }}>
+                          <Calendar size={13} style={{ display: "inline" }} /> {fmtDate(a.auctionDate)} — {a.auctionTime}
+                        </div>
+                        {a.message && (
+                          <div style={{ fontSize: "0.8rem", color: "#555", marginTop: 6, borderTop: "1px solid #eee", paddingTop: 6 }}>
+                            {a.message}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
 

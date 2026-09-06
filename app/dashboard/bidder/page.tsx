@@ -115,7 +115,7 @@ export default function BidderDashboard() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [userName, setUserName] = useState("");
-  const [auctions, setAuctions] = useState<AuctionItem[]>([]);
+  const [groupedAuctions, setGroupedAuctions] = useState<{ today: AuctionItem[]; tomorrow: AuctionItem[]; upcoming: AuctionItem[] }>({ today: [], tomorrow: [], upcoming: [] });
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -128,7 +128,11 @@ export default function BidderDashboard() {
         .from("users").select("id, name").eq("auth_id", user.id).maybeSingle();
       if (profile) setUserName(profile.name ?? "");
 
-      // Fetch auction notices with related data
+      // Fetch auction notices with related data (past 2 days to next 7 days)
+      const pastDate = new Date(); pastDate.setDate(pastDate.getDate() - 2);
+      const pastDateStr = pastDate.toISOString().split("T")[0];
+      const futureDate = new Date(); futureDate.setDate(futureDate.getDate() + 7);
+      const futureDateStr = futureDate.toISOString().split("T")[0];
       const { data: notices } = await supabase
         .from("auction_notices")
         .select(`
@@ -137,7 +141,8 @@ export default function BidderDashboard() {
           mandis(name, city),
           crop_arrivals(gattu_count, peti_count)
         `)
-        .gte("auction_date", new Date().toISOString().split("T")[0])
+        .gte("auction_date", pastDateStr)
+        .lte("auction_date", futureDateStr)
         .order("auction_date", { ascending: true });
 
       // Resolve arthi names/phones for all unique arthi_ids
@@ -152,7 +157,7 @@ export default function BidderDashboard() {
         }
       }
 
-      setAuctions((notices ?? []).map(n => {
+      const mappedAuctions = (notices ?? []).map(n => {
         const crop = n.crops as unknown as { name?: string; urdu_name?: string } | null;
         const mandi = n.mandis as unknown as { name?: string; city?: string } | null;
         const arrival = n.crop_arrivals as unknown as { gattu_count?: number | null; peti_count?: number | null } | null;
@@ -175,7 +180,27 @@ export default function BidderDashboard() {
           arrivalGattu: arrival?.gattu_count ?? null,
           arrivalPeti: arrival?.peti_count ?? null,
         };
-      }));
+      });
+
+      // Deduplicate by ID
+      const seenIds = new Set<number>();
+      const deduped = mappedAuctions.filter(a => {
+        if (seenIds.has(a.id)) return false;
+        seenIds.add(a.id);
+        return true;
+      });
+
+      // Group into today / tomorrow / upcoming
+      const todayStr = new Date().toISOString().split("T")[0];
+      const tmrDate = new Date(); tmrDate.setDate(tmrDate.getDate() + 1);
+      const tomorrowStr = tmrDate.toISOString().split("T")[0];
+      setGroupedAuctions({
+        today: deduped.filter(a => a.auctionDate === todayStr),
+        tomorrow: deduped.filter(a => a.auctionDate === tomorrowStr),
+        upcoming: deduped
+          .filter(a => a.auctionDate > tomorrowStr)
+          .sort((a, b) => a.auctionDate.localeCompare(b.auctionDate)),
+      });
     } catch (err) {
       console.error("[Bidder] Data load error:", err);
     } finally {
@@ -198,6 +223,69 @@ export default function BidderDashboard() {
       });
     }
     window.location.href = "/auth/login";
+  }
+
+  // Helper: render a list of auction cards
+  function renderAuctionCards(items: AuctionItem[]) {
+    return items.map(a => (
+      <div key={a.id} style={s.card}>
+        {/* Crop & date row */}
+        <div style={s.cropRow}>
+          <div style={s.cropName}>{a.cropUrdu}</div>
+          <span style={s.badge}>
+            <Clock size={11} style={{ display: "inline" }} /> {a.auctionTime}
+          </span>
+        </div>
+
+        {/* Mandi location */}
+        <div style={s.detailRow}>
+          <Building size={14} />
+          {a.mandiName}{a.mandiCity ? `, ${a.mandiCity}` : ""}
+        </div>
+
+        {/* Auction date */}
+        <div style={s.detailRow}>
+          <Calendar size={14} />
+          {fmtDate(a.auctionDate)}
+        </div>
+
+        {/* Arrival quantity */}
+        {(a.arrivalGattu || a.arrivalPeti) && (
+          <div style={s.qtyBox}>
+            {a.arrivalGattu ? <span style={s.qtyItem}>گٹو: {a.arrivalGattu}</span> : null}
+            {a.arrivalPeti ? <span style={s.qtyItem}>پیٹی: {a.arrivalPeti}</span> : null}
+          </div>
+        )}
+
+        {/* Message */}
+        {a.message && (
+          <div style={{ fontSize: "0.85rem", color: "#555", marginTop: "0.5rem", lineHeight: 1.5 }}>
+            {a.message}
+          </div>
+        )}
+
+        {/* Arthi contact */}
+        {a.arthiName && (
+          <div style={s.arthiSection}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>
+                {a.arthiShopName ?? a.arthiName}
+              </div>
+              <div style={{ fontSize: "0.8rem", color: "#555" }}>
+                {a.arthiName}{a.arthiShopNumber ? ` — دکان نمبر ${a.arthiShopNumber}` : ""} — آرتھی
+              </div>
+            </div>
+            {a.arthiPhone ? (
+              <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#006633" }}>
+                <Phone size={13} style={{ display: "inline", verticalAlign: "middle" }} /> {a.arthiPhone}
+              </div>
+            ) : (
+              <span style={{ fontSize: "0.8rem", color: "#999" }}>فون نمبر دستیاب نہیں</span>
+            )}
+          </div>
+        )}
+      </div>
+    ));
   }
 
   if (loading) {
@@ -229,72 +317,56 @@ export default function BidderDashboard() {
           <FileText size={18} /> آنے والی نیلامیاں
         </div>
 
-        {auctions.length === 0 ? (
+        {groupedAuctions.today.length === 0 && groupedAuctions.tomorrow.length === 0 && groupedAuctions.upcoming.length === 0 ? (
           <div style={s.emptyState}>
             فی الحال کوئی نیلامی دستیاب نہیں۔ براہ کرم بعد میں دوبارہ چیک کریں۔
           </div>
         ) : (
-          <div style={s.feed}>
-            {auctions.map(a => (
-              <div key={a.id} style={s.card}>
-                {/* Crop & date row */}
-                <div style={s.cropRow}>
-                  <div style={s.cropName}>{a.cropUrdu}</div>
-                  <span style={s.badge}>
-                    <Clock size={11} style={{ display: "inline" }} /> {a.auctionTime}
-                  </span>
+          <>
+            {groupedAuctions.today.length > 0 && (
+              <div style={{ marginBottom: "1.5rem" }}>
+                <div style={{
+                  background: "linear-gradient(135deg, #004d26 0%, #006633 100%)",
+                  color: "#fff", padding: "0.5rem 1rem", borderRadius: 8,
+                  fontWeight: 700, fontSize: "0.95rem", marginBottom: "0.75rem",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  <Calendar size={16} /> آج کی نیلامیاں
                 </div>
-
-                {/* Mandi location */}
-                <div style={s.detailRow}>
-                  <Building size={14} />
-                  {a.mandiName}{a.mandiCity ? `, ${a.mandiCity}` : ""}
+                <div style={s.feed}>
+                  {renderAuctionCards(groupedAuctions.today)}
                 </div>
-
-                {/* Auction date */}
-                <div style={s.detailRow}>
-                  <Calendar size={14} />
-                  {fmtDate(a.auctionDate)}
-                </div>
-
-                {/* Arrival quantity */}
-                {(a.arrivalGattu || a.arrivalPeti) && (
-                  <div style={s.qtyBox}>
-                    {a.arrivalGattu ? <span style={s.qtyItem}>گٹو: {a.arrivalGattu}</span> : null}
-                    {a.arrivalPeti ? <span style={s.qtyItem}>پیٹی: {a.arrivalPeti}</span> : null}
-                  </div>
-                )}
-
-                {/* Message */}
-                {a.message && (
-                  <div style={{ fontSize: "0.85rem", color: "#555", marginTop: "0.5rem", lineHeight: 1.5 }}>
-                    {a.message}
-                  </div>
-                )}
-
-                {/* Arthi contact */}
-                {a.arthiName && (
-                  <div style={s.arthiSection}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>
-                        {a.arthiShopName ?? a.arthiName}
-                      </div>
-                      <div style={{ fontSize: "0.8rem", color: "#555" }}>
-                        {a.arthiName}{a.arthiShopNumber ? ` — دکان نمبر ${a.arthiShopNumber}` : ""} — آرتھی
-                      </div>
-                    </div>
-                    {a.arthiPhone ? (
-                      <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#006633" }}>
-                        <Phone size={13} style={{ display: "inline", verticalAlign: "middle" }} /> {a.arthiPhone}
-                      </div>
-                    ) : (
-                      <span style={{ fontSize: "0.8rem", color: "#999" }}>فون نمبر دستیاب نہیں</span>
-                    )}
-                  </div>
-                )}
               </div>
-            ))}
-          </div>
+            )}
+            {groupedAuctions.tomorrow.length > 0 && (
+              <div style={{ marginBottom: "1.5rem" }}>
+                <div style={{
+                  background: "#D4AF37", color: "#1a1a1a", padding: "0.5rem 1rem", borderRadius: 8,
+                  fontWeight: 700, fontSize: "0.95rem", marginBottom: "0.75rem",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  <Calendar size={16} /> کل کی نیلامیاں
+                </div>
+                <div style={s.feed}>
+                  {renderAuctionCards(groupedAuctions.tomorrow)}
+                </div>
+              </div>
+            )}
+            {groupedAuctions.upcoming.length > 0 && (
+              <div style={{ marginBottom: "1.5rem" }}>
+                <div style={{
+                  background: "#f0f0f0", color: "#333", padding: "0.5rem 1rem", borderRadius: 8,
+                  fontWeight: 700, fontSize: "0.95rem", marginBottom: "0.75rem",
+                  display: "flex", alignItems: "center", gap: 8,
+                }}>
+                  <Calendar size={16} /> آنے والی نیلامیاں
+                </div>
+                <div style={s.feed}>
+                  {renderAuctionCards(groupedAuctions.upcoming)}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
