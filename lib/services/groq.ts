@@ -181,6 +181,7 @@ export async function transcribeAudio(
   // Log successful transcription metadata for debugging
   console.log(
     `[Groq] OK: lang=${data.language}, duration=${data.duration}s, ` +
+    `size=${audioBlob.size} bytes, ` +
     `text="${rawText.slice(0, 80)}${rawText.length > 80 ? "..." : ""}"`
   );
 
@@ -238,18 +239,113 @@ export async function transcribeToText(
           `lang=${result.language}): "${cleaned.slice(0, 80)}"`
         );
         if (attempt < MAX_ATTEMPTS) continue; // retry once
-        // Both attempts failed → return friendly Urdu message
+        // Both attempts failed — try Gemini as fallback transcriber
+        console.log("[transcribeToText] Groq failed — falling back to Gemini audio transcription");
+        const geminiResult = await geminiAudioTranscribe(audio, mimeType);
+        if (geminiResult) return geminiResult;
         return GIBBERISH_MESSAGE;
       }
 
       return cleaned;
     } catch (err) {
       console.error(`[Groq] Transcription error (attempt ${attempt}/${MAX_ATTEMPTS}):`, err);
-      if (attempt >= MAX_ATTEMPTS) return null;
+      if (attempt >= MAX_ATTEMPTS) {
+        // Groq completely failed — try Gemini as fallback
+        console.log("[transcribeToText] Groq errored out — falling back to Gemini audio transcription");
+        const geminiResult = await geminiAudioTranscribe(audio, mimeType);
+        if (geminiResult) return geminiResult;
+        return null;
+      }
     }
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Gemini audio transcription fallback
+// ---------------------------------------------------------------------------
+
+/**
+ * Uses Gemini 2.5 Flash to transcribe audio when Groq Whisper fails.
+ * Gemini has native audio understanding and often handles Urdu better
+ * than Whisper for noisy/short recordings.
+ */
+async function geminiAudioTranscribe(
+  audio: Blob | ArrayBuffer | string,
+  mimeType?: string
+): Promise<string | null> {
+  try {
+    const { GoogleGenAI } = await import("@google/genai");
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.warn("[Gemini-audio] No GEMINI_API_KEY — cannot use fallback");
+      return null;
+    }
+
+    // Normalize to base64
+    let base64: string;
+    let mime = mimeType ?? "audio/webm";
+    if (typeof audio === "string") {
+      base64 = audio;
+    } else if (audio instanceof ArrayBuffer) {
+      const bytes = new Uint8Array(audio);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      base64 = btoa(bin);
+    } else {
+      const ab = await audio.arrayBuffer();
+      const bytes = new Uint8Array(ab);
+      let bin = "";
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      base64 = btoa(bin);
+      mime = audio.type || mime;
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    console.log("[Gemini-audio] Transcribing audio via Gemini 2.5 Flash...", `mime=${mime}`, `b64len=${base64.length}`);
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.6-flash",
+      contents: {
+        role: "user",
+        parts: [
+          {
+            inlineData: {
+              data: base64,
+              mimeType: mime,
+            },
+          },
+          {
+            text:
+              "Transcribe the audio exactly as spoken. " +
+              "The speaker is speaking in Urdu about agricultural market topics " +
+              "(crop names, mandi names, prices, farmer names, gattu/peti counts). " +
+              "Return ONLY the transcribed text in the original language (Urdu script). " +
+              "Do not translate. Do not add commentary. Just the exact words spoken.",
+          },
+        ],
+      },
+    });
+
+    const text = (response.text ?? "").trim();
+    console.log("[Gemini-audio] Transcription result:", text.slice(0, 200));
+
+    if (!text || text.length < 2) return null;
+
+    // Basic cleanup
+    const cleaned = text
+      .replace(/\[.*?\]/g, "")
+      .replace(/\(.*?\)/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!cleaned || cleaned.length < 2) return null;
+    return cleaned;
+  } catch (err) {
+    console.error("[Gemini-audio] Fallback transcription error:", err);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
