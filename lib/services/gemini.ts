@@ -79,6 +79,8 @@ export interface MandiRateExtraction {
   minPrice: number | null;
   maxPrice: number | null;
   avgPrice: number | null;
+  /** Single/current price when user mentions just one price */
+  currentPrice: number | null;
 }
 
 /** Structured fields from an auction-arrival voice transcription */
@@ -236,18 +238,128 @@ export async function extractReceiptFields(
 const MANDI_RATE_SYSTEM_PROMPT = `You are a data extraction assistant for Pakistani mandi (agricultural market) voice notes.
 The user provides a transcription of an Arthi speaking about current market rates.
 Extract crop name, mandi name, and price data. All prices are in PKR per unit.
+
+CRITICAL: Prices are often spoken as Urdu/Hindi number words. You MUST convert them to Arabic numeral integers.
+Examples:
+- "آٹھ سو" = 800
+- "بارہ سو" = 1200
+- "ایک ہزار" = 1000
+- "پانچ سو پچاس" = 550
+- "دو ہزار" = 2000
+- "تین ہزار پانچ سو" = 3500
+- "چار سو" = 400
+- "نو سو" = 900
+- "دس ہزار" = 10000
+- "پچاس ہزار" = 50000
+
+If only one price is mentioned, put it in currentPrice.
+If a range is mentioned (X سے Y), put the lower in minPrice and higher in maxPrice.
+If اوسط (average) is mentioned, put it in avgPrice.
+
 Return ONLY valid JSON. Use null for any field not found.`;
 
 const MANDI_RATE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
     cropName: { type: Type.STRING, description: "Crop name (Urdu or English)", nullable: true },
-    mandiName: { type: Type.STRING, description: "Mandi/market name", nullable: true },
-    minPrice: { type: Type.NUMBER, description: "Minimum price in PKR", nullable: true },
-    maxPrice: { type: Type.NUMBER, description: "Maximum price in PKR", nullable: true },
-    avgPrice: { type: Type.NUMBER, description: "Average price in PKR", nullable: true },
+    mandiName: { type: Type.STRING, description: "Mandi/market name (Urdu or English)", nullable: true },
+    minPrice: { type: Type.NUMBER, description: "Minimum price as integer in PKR (e.g. 800 not آٹھ سو)", nullable: true },
+    maxPrice: { type: Type.NUMBER, description: "Maximum price as integer in PKR (e.g. 1200 not بارہ سو)", nullable: true },
+    avgPrice: { type: Type.NUMBER, description: "Average price as integer in PKR (e.g. 1000 not ایک ہزار)", nullable: true },
+    currentPrice: { type: Type.NUMBER, description: "Single/current price as integer in PKR when only one price is mentioned", nullable: true },
   },
 };
+
+// ---------------------------------------------------------------------------
+// Urdu number word → digit converter (fallback for when Gemini fails)
+// ---------------------------------------------------------------------------
+
+const URDU_DIGIT_MAP: Record<string, number> = {
+  "صفر": 0, "ایک": 1, "دو": 2, "تین": 3, "چار": 4, "پانچ": 5,
+  "چھ": 6, "سات": 7, "آٹھ": 8, "نو": 9, "دس": 10,
+  "گیارہ": 11, "بارہ": 12, "تیرہ": 13, "چودہ": 14, "پندرہ": 15,
+  "سولہ": 16, "سترہ": 17, "اٹھارہ": 18, "انیس": 19, "بیس": 20,
+  "پچیس": 25, "تیس": 30, "پینتیس": 35, "چالیس": 40, "پینتالیس": 45,
+  "پچاس": 50, "ساٹھ": 60, "ستر": 70, "اسی": 80, "نوی": 90, "سو": 100,
+};
+
+const URDU_MULTIPLIER_MAP: Record<string, number> = {
+  "سو": 100, "ہزار": 1000, "لاکھ": 100000, "کروڑ": 10000000,
+};
+
+/**
+ * Attempts to convert Urdu number words in a text segment to a numeric value.
+ * E.g., "آٹھ سو" → 800, "بارہ سو" → 1200, "ایک ہزار" → 1000, "پانچ سو پچاس" → 550
+ */
+function urduWordsToNumber(text: string): number | null {
+  const words = text.replace(/[،,.!?؟]/g, "").split(/\s+/).filter(Boolean);
+  let total = 0;
+  let current = 0;
+  let matched = false;
+
+  for (const word of words) {
+    if (URDU_MULTIPLIER_MAP[word] !== undefined) {
+      const multiplier = URDU_MULTIPLIER_MAP[word];
+      total += (current > 0 ? current : 1) * multiplier;
+      current = 0;
+      matched = true;
+    } else if (URDU_DIGIT_MAP[word] !== undefined) {
+      current = current + URDU_DIGIT_MAP[word];
+      matched = true;
+    }
+    // Also try Eastern Arabic numerals: ۰۱۲۳۴۵۶۷۸۹
+    const easternDigits = word.replace(/[۰-۹]/g, d =>
+      String("۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+    );
+    if (/^\d+$/.test(easternDigits) && easternDigits !== word) {
+      current = parseInt(easternDigits, 10);
+      matched = true;
+    }
+  }
+
+  total += current;
+  return matched && total > 0 ? total : null;
+}
+
+/**
+ * Fallback: extract prices from Urdu transcription text using regex patterns.
+ * Used when Gemini returns null prices.
+ */
+function extractPricesFromText(text: string): {
+  minPrice: number | null;
+  maxPrice: number | null;
+  avgPrice: number | null;
+  currentPrice: number | null;
+} {
+  const result = { minPrice: null as number | null, maxPrice: null as number | null, avgPrice: null as number | null, currentPrice: null as number | null };
+
+  // Pattern: "X سے Y" (range: X to Y)
+  const rangeMatch = text.match(/([\u0600-\u06FF\s۰-۹]+)\s+سے\s+([\u0600-\u06FF\s۰-۹]+)/);
+  if (rangeMatch) {
+    const low = urduWordsToNumber(rangeMatch[1]);
+    const high = urduWordsToNumber(rangeMatch[2]);
+    if (low && high) {
+      result.minPrice = Math.min(low, high);
+      result.maxPrice = Math.max(low, high);
+    }
+  }
+
+  // Pattern: "اوسط ... NUMBER" (average)
+  const avgSegment = text.match(/اوسط[^۔]*?([\u0600-\u06FF\s۰-۹]+?)(?:\s+روپے|\s+ہے|$)/);
+  if (avgSegment) {
+    result.avgPrice = urduWordsToNumber(avgSegment[1]);
+  }
+
+  // Pattern: single price "قیمت NUMBER روپے"
+  if (!result.minPrice && !result.maxPrice) {
+    const singleMatch = text.match(/قیمت\s+([\u0600-\u06FF\s۰-۹]+?)\s*(?:روپے|فی|$)/);
+    if (singleMatch) {
+      result.currentPrice = urduWordsToNumber(singleMatch[1]);
+    }
+  }
+
+  return result;
+}
 
 /**
  * Parses a voice transcription into structured mandi rate data.
@@ -277,15 +389,35 @@ export async function parseMandiRateTranscription(
     console.log("[Gemini] parseMandiRateTranscription parsed:", parsed);
     if (!parsed) return null;
 
+    // If Gemini returned null prices, try the Urdu fallback extractor
+    const hasGeminiPrice = parsed.minPrice || parsed.maxPrice || parsed.avgPrice || parsed.currentPrice;
+    let fallback: { minPrice: number | null; maxPrice: number | null; avgPrice: number | null; currentPrice: number | null } = { minPrice: null, maxPrice: null, avgPrice: null, currentPrice: null };
+    if (!hasGeminiPrice) {
+      console.log("[Gemini] No prices from Gemini — running Urdu fallback extractor on:", transcriptionText.slice(0, 300));
+      fallback = extractPricesFromText(transcriptionText);
+      console.log("[Gemini] Fallback extracted:", fallback);
+    }
+
     return {
       cropName: parsed.cropName ?? null,
       mandiName: parsed.mandiName ?? null,
-      minPrice: parsed.minPrice ?? null,
-      maxPrice: parsed.maxPrice ?? null,
-      avgPrice: parsed.avgPrice ?? null,
+      minPrice: parsed.minPrice ?? fallback.minPrice,
+      maxPrice: parsed.maxPrice ?? fallback.maxPrice,
+      avgPrice: parsed.avgPrice ?? fallback.avgPrice,
+      currentPrice: parsed.currentPrice ?? fallback.currentPrice,
     };
   } catch (err) {
     console.error("[Gemini] Mandi rate parsing error:", err);
+    // Last resort: try fallback even on Gemini error
+    const fallback = extractPricesFromText(transcriptionText);
+    if (fallback.minPrice || fallback.maxPrice || fallback.avgPrice || fallback.currentPrice) {
+      console.log("[Gemini] Fallback rescued after error:", fallback);
+      return {
+        cropName: null, mandiName: null,
+        minPrice: fallback.minPrice, maxPrice: fallback.maxPrice,
+        avgPrice: fallback.avgPrice, currentPrice: fallback.currentPrice,
+      };
+    }
     return null;
   }
 }

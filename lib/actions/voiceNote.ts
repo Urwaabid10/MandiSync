@@ -97,6 +97,7 @@ export async function processVoiceNote(
               minPrice: result.minPrice,
               maxPrice: result.maxPrice,
               avgPrice: result.avgPrice,
+              currentPrice: result.currentPrice,
             }
           : {};
         console.log("[processVN] mandi_rate entities:", entities);
@@ -179,11 +180,19 @@ export async function confirmVoiceNote(
         });
         console.log("[confirmVN] mandi_rate resolved:", resolved);
         const price =
-          (e.avgPrice as number) ?? (e.maxPrice as number) ?? (e.minPrice as number);
+          (e.avgPrice as number) ?? (e.currentPrice as number) ?? (e.maxPrice as number) ?? (e.minPrice as number);
         console.log("[confirmVN] mandi_rate price:", price, "cropId:", resolved.cropId, "mandiId:", resolved.mandiId);
-        if (!resolved.cropId || !price) {
-          console.error("[confirmVN] mandi_rate: missing cropId or price", { cropId: resolved.cropId, price, entities: e });
-          return { success: false, message: "فصل یا قیمت نہیں ملی — واضح بولیں" };
+        if (!resolved.cropId && !price) {
+          console.error("[confirmVN] mandi_rate: missing both cropId and price", { entities: e });
+          return { success: false, message: "فصل اور قیمت دونوں نہیں ملے — واضح بولیں" };
+        }
+        if (!resolved.cropId) {
+          console.error("[confirmVN] mandi_rate: missing cropId", { cropName: e.cropName, entities: e });
+          return { success: false, message: "فصل کا نام نہیں ملا — واضح بولیں" };
+        }
+        if (!price) {
+          console.error("[confirmVN] mandi_rate: missing price", { entities: e });
+          return { success: false, message: "قیمت نہیں مل سکی — واضح بولیں (مثلاً: آٹھ سو، بارہ سو)" };
         }
         const { error: priceErr } = await supabase.from("mandi_prices").insert({
           arthi_id: arthiId,
