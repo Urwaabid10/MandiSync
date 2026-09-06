@@ -39,6 +39,35 @@ function getClient(): GoogleGenAI {
   return _client;
 }
 
+/**
+ * Wraps a Gemini generateContent call with retry logic for transient errors (503, 429).
+ * Retries up to 2 times with exponential backoff (1s, 2s).
+ */
+async function callGeminiWithRetry(
+  params: Parameters<GoogleGenAI["models"]["generateContent"]>[0]
+): Promise<Awaited<ReturnType<GoogleGenAI["models"]["generateContent"]>>> {
+  const MAX_RETRIES = 2;
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      const ai = getClient();
+      return await ai.models.generateContent(params);
+    } catch (err: unknown) {
+      const isTransient =
+        err instanceof Error &&
+        (err.message.includes("503") ||
+          err.message.includes("UNAVAILABLE") ||
+          err.message.includes("429") ||
+          err.message.includes("RESOURCE_EXHAUSTED"));
+      if (!isTransient || attempt > MAX_RETRIES) throw err;
+      const delayMs = attempt * 1000; // 1s, 2s
+      console.warn(`[Gemini] Transient error (attempt ${attempt}/${MAX_RETRIES + 1}), retrying in ${delayMs}ms...`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  // Unreachable, but TS needs a return
+  throw new Error("Gemini retry exhausted");
+}
+
 // ---------------------------------------------------------------------------
 // Shared extraction types
 // ---------------------------------------------------------------------------
@@ -183,8 +212,7 @@ export async function extractReceiptFields(
   mimeType: string = "image/jpeg"
 ): Promise<ReceiptExtraction | null> {
   try {
-    const ai = getClient();
-    const response = await ai.models.generateContent({
+    const response = await callGeminiWithRetry({
       model: MODEL,
       contents: {
         role: "user",
@@ -438,8 +466,7 @@ export async function parseMandiRateTranscription(
 
   try {
     console.log("[Gemini] parseMandiRateTranscription input:", transcriptionText.slice(0, 200));
-    const ai = getClient();
-    const response = await ai.models.generateContent({
+    const response = await callGeminiWithRetry({
       model: MODEL,
       contents: transcriptionText,
       config: {
@@ -517,8 +544,7 @@ export async function parseArrivalTranscription(
   if (!transcriptionText?.trim()) return null;
 
   try {
-    const ai = getClient();
-    const response = await ai.models.generateContent({
+    const response = await callGeminiWithRetry({
       model: MODEL,
       contents: transcriptionText,
       config: {
@@ -528,6 +554,7 @@ export async function parseArrivalTranscription(
       },
     });
 
+    console.log("[Gemini] parseArrivalTranscription raw response:", response.text?.slice(0, 300));
     const parsed = safeJsonParse<ArrivalExtraction>(response.text);
     if (!parsed) return null;
 
@@ -574,8 +601,7 @@ export async function parseSettlementAudioTranscription(
   if (!transcriptionText?.trim()) return null;
 
   try {
-    const ai = getClient();
-    const response = await ai.models.generateContent({
+    const response = await callGeminiWithRetry({
       model: MODEL,
       contents: transcriptionText,
       config: {
@@ -585,6 +611,7 @@ export async function parseSettlementAudioTranscription(
       },
     });
 
+    console.log("[Gemini] parseSettlementAudioTranscription raw response:", response.text?.slice(0, 300));
     const parsed = safeJsonParse<SettlementAudioExtraction>(response.text);
     if (!parsed) return null;
 

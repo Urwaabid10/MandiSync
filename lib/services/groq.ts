@@ -21,11 +21,25 @@ export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 export const GIBBERISH_MESSAGE =
   "آواز صحیح نہیں سنائی دی۔ براہ کرم دوبارہ صاف آواز میں ریکارڈ کریں۔";
 
-// Agricultural domain prompt — guides Whisper toward Pakistani mandi vocabulary
+/** Known Whisper hallucination outputs that should be rejected */
+const HALLUCINATION_TOKENS = new Set([
+  "موسیقی",       // "music" — Whisper's #1 Urdu hallucination
+  "شکریہ",        // "thank you"
+  "براہ مہربانی", // "please"
+  "you",          // English hallucination
+  "thanks for watching",
+  "please subscribe",
+  "here we go",
+]);
+
+// Agricultural domain prompt — natural sentences to guide Whisper
+// Whisper works much better with sentence examples than keyword lists
 const URDU_WHISPER_PROMPT =
-  "گندم, کپاس, چاول, مکئی, گنا, منڈی, فیصل آباد, سدھو منڈی, نیو سدھار منڈی, " +
-  "فی من, روپیہ, نرخ, ریٹ, آرتھی, بوڑا, مزارع, کسان, گٹو, پیٹی, بولی, نقد, " +
-  "سیٹلمنٹ, بکری, آمد, پرچی, wheat, cotton, rice, maund, 40 kg, mandi, rate";
+  "آج منڈی میں گندم کی قیمت بارہ سو روپے فی من ہے۔ " +
+  "کسان محمد صاحب پانچ گٹے کپاس لائے ہیں۔ " +
+  "سرگودھا منڈی میں کینو کا ریٹ آٹھ سو سے ایک ہزار روپے ہے۔ " +
+  "فیصل آباد منڈی میں چاول کی آمد ہوئی۔ " +
+  "منڈی نرخ، فصل، کسان، گٹو، پیٹی، بولی، نرخ، آرتھی، مزارع، سیٹلمنٹ، پرچی، کمیشن۔";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -129,6 +143,9 @@ export async function transcribeAudio(
   // ── Agricultural domain prompt ──
   form.append("prompt", URDU_WHISPER_PROMPT);
 
+  // ── Low temperature for deterministic output (reduces hallucinations) ──
+  form.append("temperature", "0");
+
   // Call Groq API
   const response = await fetch(GROQ_API_URL, {
     method: "POST",
@@ -214,9 +231,10 @@ export async function transcribeToText(
 
       // ── Gibberish / language isolation guard ──
       const gibberish = isGibberish(cleaned, result.language);
-      if (gibberish) {
+      const hallucination = isHallucination(cleaned);
+      if (gibberish || hallucination) {
         console.warn(
-          `[Groq] Gibberish detected (attempt ${attempt}/${MAX_ATTEMPTS}, ` +
+          `[Groq] ${hallucination ? "Hallucination" : "Gibberish"} detected (attempt ${attempt}/${MAX_ATTEMPTS}, ` +
           `lang=${result.language}): "${cleaned.slice(0, 80)}"`
         );
         if (attempt < MAX_ATTEMPTS) continue; // retry once
@@ -302,9 +320,21 @@ const LATIN_EXTENDED_RE = /[\u00C0-\u024F]/;
  * If only ONE signal fires, we log a warning but still accept the text
  * to avoid blocking legitimate Urdu / Roman Urdu transcriptions.
  */
+/**
+ * Returns true if the transcription matches a known Whisper hallucination.
+ * E.g., Whisper outputting "موسیقی" (music) for all Urdu audio.
+ */
+function isHallucination(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (HALLUCINATION_TOKENS.has(normalized)) return true;
+  // Also check if the text is ONLY a hallucination token with punctuation
+  const stripped = normalized.replace(/[.!?؟،۔]/g, "").trim();
+  return HALLUCINATION_TOKENS.has(stripped);
+}
+
 function isGibberish(text: string, detectedLang?: string): boolean {
   // 1. Language check — flag clearly wrong languages
-  const KNOWN_LANGS = new Set(["ur", "en", "hi", "pa", "ps", "sd", "ar", "fa"]);
+  const KNOWN_LANGS = new Set(["ur", "en", "hi", "pa", "ps", "sd", "ar", "fa", "Urdu", "English", "Hindi"]);
   const langBad = !!detectedLang && !KNOWN_LANGS.has(detectedLang);
 
   // 2. Character distribution check
