@@ -285,7 +285,15 @@ export default function SignupPage() {
           userRow.shop_name = shopName.trim() || null;
           userRow.shop_number = shopNumber.trim() || null;
         }
-        await supabase.from("users").upsert(userRow, { onConflict: "auth_id" });
+        const { error: upsertError } = await supabase
+          .from("users")
+          .upsert(userRow, { onConflict: "auth_id" });
+
+        if (upsertError) {
+          console.error("users upsert error:", upsertError);
+          // Non-fatal: the trigger may have already created the row.
+          // Only surface the error if the row truly doesn't exist.
+        }
       }
 
       // Check if email confirmation is required
@@ -299,9 +307,16 @@ export default function SignupPage() {
       router.push(destination);
       router.refresh();
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "رجسٹریشن ناکام ہوئی"
-      );
+      const msg = err instanceof Error ? err.message : "رجسٹریشن ناکام ہوئی";
+      console.error("Signup error:", err);
+      // Map common Supabase internal errors to user-friendly messages
+      if (msg.toLowerCase().includes("database error saving")) {
+        setError(
+          "ڈیٹابیس میں اکاؤنٹ محفوظ نہیں ہو سکا۔ براہ کرم Supabase SQL Editor میں trigger فنکشن چیک کریں یا دوبارہ کوشش کریں۔"
+        );
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }

@@ -180,6 +180,10 @@ BEGIN
   )
   ON CONFLICT (auth_id) DO NOTHING;
   RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+  -- Log error but don't block auth flow — the client-side upsert acts as fallback
+  RAISE WARNING 'handle_new_user trigger failed: %', SQLERRM;
+  RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
