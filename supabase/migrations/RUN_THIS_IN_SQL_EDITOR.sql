@@ -1,6 +1,11 @@
 -- ============================================================================
--- COPY THIS ENTIRE FILE INTO: Supabase Dashboard → SQL Editor → Run
--- This fixes ALL dashboards: Farmer, Bidder, Arthi
+-- ⚠️  SUPERSEDED — Use 20261010_master_rls_fix.sql instead
+-- That file contains the comprehensive, up-to-date RLS policies fixing:
+--   1. New farmer accounts not seeing mandi rates, voice notes, 7-day charts
+--   2. Settlement slips visible to all farmers (now restricted to own shop)
+--   3. New bidder accounts not seeing upcoming biddings
+--
+-- COPY 20261010_master_rls_fix.sql INTO: Supabase Dashboard → SQL Editor → Run
 -- ============================================================================
 
 -- ═══ PART 1: Enable RLS on all tables ═══
