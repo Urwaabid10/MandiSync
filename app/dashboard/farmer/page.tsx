@@ -357,17 +357,34 @@ export default function FarmerDashboard() {
       }
 
       // ── Arthi profiles with per-arthi voice updates ──
-      const uniqueArthiIds = [...new Set(entries.map(e => e.arthiId).filter(Boolean))];
-      if (uniqueArthiIds.length > 0) {
-        const { data: arthiUsers } = await supabase
+      // Load ALL arthi users so voice notes & shops are always visible,
+      // not just arthis who happen to have mandi price entries.
+      const priceArthiIds = new Set(entries.map(e => e.arthiId).filter(Boolean));
+      const { data: allArthiUsers } = await supabase
+        .from("users")
+        .select("id, name, phone, shop_name, shop_number, shop_address, shop_city")
+        .eq("role", "arthi");
+
+      // Combine: all arthi users + any extra arthi IDs from mandi prices
+      const allArthiMap = new Map<number, { id: number; name: string | null; phone: string | null; shop_name: string | null; shop_number: string | null; shop_address: string | null; shop_city: string | null }>();
+      for (const u of (allArthiUsers ?? [])) allArthiMap.set(u.id, u);
+      // Fetch any mandi-price arthis not already loaded (e.g. role mismatch)
+      const extraIds = [...priceArthiIds].filter(id => !allArthiMap.has(id));
+      if (extraIds.length > 0) {
+        const { data: extraUsers } = await supabase
           .from("users")
           .select("id, name, phone, shop_name, shop_number, shop_address, shop_city")
-          .in("id", uniqueArthiIds);
+          .in("id", extraIds);
+        for (const u of (extraUsers ?? [])) allArthiMap.set(u.id, u);
+      }
 
+      const combinedArthiIds = [...allArthiMap.keys()];
+
+      if (combinedArthiIds.length > 0) {
         const { data: allVoice } = await supabase
           .from("arthi_voice_updates")
           .select("id, arthi_id, audio_url, transcribed_text, created_at")
-          .in("arthi_id", uniqueArthiIds)
+          .in("arthi_id", combinedArthiIds)
           .order("created_at", { ascending: false });
 
         const voiceByArthi = new Map<number, VoiceUpdate[]>();
@@ -382,7 +399,7 @@ export default function FarmerDashboard() {
           });
         }
 
-        const shopList: ShopProfile[] = (arthiUsers ?? []).map(u => ({
+        const shopList: ShopProfile[] = [...allArthiMap.values()].map(u => ({
           id: u.id,
           shopName: u.shop_name,
           shopNumber: u.shop_number,
@@ -415,7 +432,7 @@ export default function FarmerDashboard() {
         };
       }));
 
-      console.log("[Farmer] total price entries:", entries.length, "shops:", uniqueArthiIds.length);
+      console.log("[Farmer] total price entries:", entries.length, "shops:", combinedArthiIds.length);
 
       // ── Settlements ──
       const rawSettlements = (settlementsRes.data ?? []) as Array<SettlementRow & {
