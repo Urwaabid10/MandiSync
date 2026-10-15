@@ -223,12 +223,12 @@ export default function FarmerDashboard() {
       setUserName(profile.name ?? "");
       setFarmerId(profile.id);
 
-      // Parallel loads
+      // Parallel loads — use allSettled so one failure doesn't blank the whole dashboard
       const pastDate = new Date(); pastDate.setDate(pastDate.getDate() - 2);
       const pastDateStr = pastDate.toISOString().split("T")[0];
       const futureDate = new Date(); futureDate.setDate(futureDate.getDate() + 7);
       const futureDateStr = futureDate.toISOString().split("T")[0];
-      const [pricesRes, auctionsRes, settlementsRes] = await Promise.all([
+      const [pricesRes, auctionsRes, settlementsRes] = await Promise.allSettled([
         supabase.from("mandi_prices")
           .select("id, price, created_at, mandi_id, arthi_id, crops(name, urdu_name)")
           .order("created_at", { ascending: false })
@@ -244,12 +244,17 @@ export default function FarmerDashboard() {
           .order("settlement_date", { ascending: false }).limit(20),
       ]);
 
-      console.log("[Farmer] mandi_prices:", pricesRes.error?.message ?? `${(pricesRes.data ?? []).length} rows`);
-      console.log("[Farmer] auctions:", auctionsRes.error?.message ?? `${(auctionsRes.data ?? []).length} rows`);
-      console.log("[Farmer] settlements:", settlementsRes.error?.message ?? `${(settlementsRes.data ?? []).length} rows`);
+      // Unwrap each result independently — a failure in one must not block the others
+      const pricesData = pricesRes.status === "fulfilled" ? pricesRes.value : { data: null, error: { message: pricesRes.reason?.message ?? "mandi_prices query failed" } };
+      const auctionsData = auctionsRes.status === "fulfilled" ? auctionsRes.value : { data: null, error: { message: auctionsRes.reason?.message ?? "auction_notices query failed" } };
+      const settlementsData = settlementsRes.status === "fulfilled" ? settlementsRes.value : { data: null, error: { message: settlementsRes.reason?.message ?? "settlements query failed" } };
+
+      console.log("[Farmer] mandi_prices:", pricesData.error ? `ERROR: ${pricesData.error.message}` : `${(pricesData.data ?? []).length} rows`);
+      console.log("[Farmer] auctions:", auctionsData.error ? `ERROR: ${auctionsData.error.message}` : `${(auctionsData.data ?? []).length} rows`);
+      console.log("[Farmer] settlements:", settlementsData.error ? `ERROR: ${settlementsData.error.message}` : `${(settlementsData.data ?? []).length} rows`);
 
       // ── Fetch ALL mandi details ──
-      const priceRows = pricesRes.data ?? [];
+      const priceRows = pricesData.data ?? [];
       const { data: allMandis } = await supabase
         .from("mandis").select("id, name, city");
       const mandiMap = new Map<number, { name: string; city: string }>();
@@ -303,8 +308,9 @@ export default function FarmerDashboard() {
       }
 
       // ── Price entries with crop names ──
-      if (pricesRes.error) {
-        console.error("[Farmer] mandi_prices error:", pricesRes.error.message);
+      if (pricesData.error) {
+        console.error("[Farmer] mandi_prices error:", pricesData.error.message);
+        setError(prev => prev ? `${prev}\nنرخ: ${pricesData.error.message}` : `نرخ: ${pricesData.error.message}`);
       }
       const entries: MandiPriceEntry[] = priceRows.map(row => {
         const mandi = mandiMap.get(row.mandi_id ?? 0) ?? null;
@@ -413,8 +419,12 @@ export default function FarmerDashboard() {
       }
 
       // ── Auction notices ──
+      if (auctionsData.error) {
+        console.error("[Farmer] auction_notices error:", auctionsData.error.message);
+        setError(prev => prev ? `${prev}\nنیلامی: ${auctionsData.error.message}` : `نیلامی: ${auctionsData.error.message}`);
+      }
       const seenAuctionIds = new Set<number>();
-      setAuctions((auctionsRes.data ?? []).filter(a => {
+      setAuctions((auctionsData.data ?? []).filter(a => {
         if (seenAuctionIds.has(a.id)) return false;
         seenAuctionIds.add(a.id);
         return true;
@@ -435,7 +445,11 @@ export default function FarmerDashboard() {
       console.log("[Farmer] total price entries:", entries.length, "shops:", combinedArthiIds.length);
 
       // ── Settlements ──
-      const rawSettlements = (settlementsRes.data ?? []) as Array<SettlementRow & {
+      if (settlementsData.error) {
+        console.error("[Farmer] settlements error:", settlementsData.error.message);
+        setError(prev => prev ? `${prev}\nسیٹلمنٹ: ${settlementsData.error.message}` : `سیٹلمنٹ: ${settlementsData.error.message}`);
+      }
+      const rawSettlements = (settlementsData.data ?? []) as Array<SettlementRow & {
         arthi?: { name?: string; shop_name?: string; shop_address?: string; shop_city?: string } | null;
         crops?: { name?: string; urdu_name?: string } | null;
         settlement_bidders?: Array<{ bidder_name?: string | null; gattu_count?: number | null; cost?: number | null }>;
