@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, type FormEvent, type CSSProperties } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import type { Tables, Json } from "@/types/supabase";
@@ -212,6 +212,17 @@ export default function ArthiDashboard() {
   const [transcribing, setTranscribing] = useState(false);
   const [vnResult, setVnResult] = useState<VoiceNoteResult | null>(null);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+
+  // Blob URL for audio playback — memoized to avoid leaks on re-render
+  const voiceBlobUrl = useMemo(() => {
+    return voiceBlob ? URL.createObjectURL(voiceBlob) : null;
+  }, [voiceBlob]);
+  // Revoke blob URL on unmount or when blob changes
+  useEffect(() => {
+    return () => {
+      if (voiceBlobUrl) URL.revokeObjectURL(voiceBlobUrl);
+    };
+  }, [voiceBlobUrl]);
 
   // Arrivals state
   const [arrivals, setArrivals] = useState<ArrivalView[]>([]);
@@ -1094,7 +1105,7 @@ export default function ArthiDashboard() {
                 <>
                   <audio
                     controls
-                    src={URL.createObjectURL(voiceBlob)}
+                    src={voiceBlobUrl ?? undefined}
                     style={{ width: "100%", maxWidth: 340, marginTop: 8 }}
                   />
                   <div style={{ display: "flex", gap: "0.75rem", marginTop: 8 }}>
@@ -1119,7 +1130,10 @@ export default function ArthiDashboard() {
               )}
 
               {/* Preview state: show structured result + confirm */}
-              {vnResult && vnResult.success && (
+              {vnResult && vnResult.success && (() => {
+                const allEntitiesNull = Object.keys(vnResult.entities).length === 0 ||
+                  Object.values(vnResult.entities).every(v => v == null);
+                return (
                 <div style={{ width: "100%", background: "#f4f7f5", borderRadius: 12, padding: "1rem", marginTop: 8 }}>
                   <div style={{ fontSize: "0.9rem", fontWeight: 700, color: c.primary, marginBottom: "0.5rem" }}>
                     نتیجہ — جائزہ لیں
@@ -1148,23 +1162,55 @@ export default function ArthiDashboard() {
                           </div>
                         );
                       })}
-                      {Object.values(vnResult.entities).every(v => v == null) && (
-                        <div style={{ color: c.error, fontSize: "0.8rem", marginTop: 6, fontWeight: 600 }}>
-                          ⚠ آواز واضح نہیں — براہ کرم فصل، منڈی اور نرخ صاف بولیں
-                        </div>
-                      )}
                     </div>
                   )}
+
+                  {/* Prominent warning when transcription is garbled / no entities extracted */}
+                  {allEntitiesNull && (
+                    <div style={{
+                      background: "#fff3f3", border: `2px solid ${c.error}`, borderRadius: 10,
+                      padding: "0.85rem 1rem", marginTop: "0.75rem",
+                    }}>
+                      <div style={{ color: c.error, fontWeight: 700, fontSize: "0.9rem", marginBottom: 4 }}>
+                        ⚠ آواز واضح نہیں — کچھ بھی نہیں نکلا
+                      </div>
+                      <div style={{ color: c.muted, fontSize: "0.8rem", lineHeight: 1.6 }}>
+                        آواز صاف نہیں تھی یا شور زیادہ تھا۔ براہ کرم دوبارہ ریکارڈ کریں:
+                        <br />• شور والی جگہ سے دور رہیں
+                        <br />• فون منہ کے قریب رکھیں
+                        <br />• واضح اور آہستہ بولیں: فصل، منڈی، قیمت
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem" }}>
-                    <button style={s.btnPrimary} onClick={saveTranscribedVN}>
-                      <CheckCircle size={14} /> تصدیق اور محفوظ کریں
-                    </button>
-                    <button style={s.btnOutline} onClick={handleDiscardVN}>
-                      واپس
-                    </button>
+                    {allEntitiesNull ? (
+                      // When extraction failed: only offer re-record, block save
+                      <button
+                        style={{ ...s.btnPrimary, flex: 1, background: c.error }}
+                        onClick={() => {
+                          // Discard and reset so user can re-record immediately
+                          setVoiceBlob(null);
+                          setVnResult(null);
+                          setVoiceStatus("");
+                        }}
+                      >
+                        <Mic size={14} /> دوبارہ ریکارڈ کریں
+                      </button>
+                    ) : (
+                      <>
+                        <button style={s.btnPrimary} onClick={saveTranscribedVN}>
+                          <CheckCircle size={14} /> تصدیق اور محفوظ کریں
+                        </button>
+                        <button style={s.btnOutline} onClick={handleDiscardVN}>
+                          واپس
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
-              )}
+                );
+              })()}
 
               {/* Error from transcription */}
               {vnResult && !vnResult.success && (
