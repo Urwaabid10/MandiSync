@@ -62,7 +62,19 @@ export async function processVoiceNote(
   }
 
   // Step 1: Groq Whisper transcription
-  const text = await transcribeToText(audioBase64, mimeType);
+  let text: string | null;
+  try {
+    text = await transcribeToText(audioBase64, mimeType);
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("[processVN] transcribeToText threw:", errMsg);
+    return {
+      success: false,
+      transcribedText: null,
+      entities: {},
+      error: `ٹرانسکرپشن خرابی: ${errMsg}`,
+    };
+  }
   if (!text) {
     return {
       success: false,

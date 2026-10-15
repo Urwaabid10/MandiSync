@@ -531,8 +531,9 @@ export default function ArthiDashboard() {
         setVoiceStatus(result.error ?? "خرابی");
       }
     } catch (err) {
-      console.error("Groq Transcription Error:", err);
-      setVoiceStatus("ٹرانسکرپشن ناکام — براہ کرم دوبارہ کوشش کریں");
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error("Groq Transcription Error:", errMsg);
+      setVoiceStatus(`خرابی: ${errMsg.slice(0, 120)}`);
     } finally {
       setTranscribing(false);
     }
